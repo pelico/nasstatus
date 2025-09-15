@@ -17,17 +17,23 @@
             margin: 0;
         }
         .container {
-            max-width: 800px;
+            max-width: 900px;
             width: 100%;
             background: #1e1e1e;
             padding: 25px;
             border-radius: 12px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
-        h1 {
+        h1, h2 {
             text-align: center;
             color: #bb86fc;
-            margin-bottom: 30px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+        h2 {
+            font-size: 1.5em;
+            margin-top: 40px;
         }
         .grid-container {
             display: grid;
@@ -39,6 +45,9 @@
             padding: 20px;
             border-radius: 8px;
             text-align: center;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
         }
         .metric-label {
             font-size: 1em;
@@ -52,10 +61,27 @@
             color: #03dac6;
             font-family: "Courier New", Courier, monospace;
         }
+        .metric-value.small-font {
+            font-size: 1.2em;
+        }
         .metric-subvalue {
             font-size: 0.9em;
             color: #a0a0a0;
             margin-top: 5px;
+        }
+        .progress-bar-container {
+            width: 100%;
+            background-color: #444;
+            border-radius: 5px;
+            margin-top: 10px;
+            height: 10px;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #03dac6;
+            border-radius: 5px;
+            width: 0%; /* Default width */
+            transition: width 0.5s ease-in-out;
         }
         #status-footer {
             text-align: center;
@@ -88,14 +114,21 @@
                 <div class="metric-value" id="net-up">-- MB/s</div>
             </div>
             <div class="metric-card">
-                <span class="metric-label">总下载量</span>
-                <div class="metric-value" id="net-total-down">-- GB</div>
+                <span class="metric-label">系统运行时间</span>
+                <div class="metric-value small-font" id="system-uptime">--</div>
             </div>
-             <div class="metric-card">
-                <span class="metric-label">总上传量</span>
-                <div class="metric-value" id="net-total-up">-- GB</div>
+            <div class="metric-card">
+                <span class="metric-label">系统开机时间</span>
+                <div class="metric-value small-font" id="boot-time">--</div>
             </div>
         </div>
+        
+        <!-- 新增硬盘空间部分 -->
+        <h2 id="disk-title" style="display:none;">硬盘空间</h2>
+        <div class="grid-container" id="disk-info-container">
+            <!-- 硬盘信息将由JS动态插入这里 -->
+        </div>
+
         <div id="status-footer">
             <span id="status-text">正在连接...</span>
             <span id="error-text" class="error"></span>
@@ -106,133 +139,177 @@
         // ##################################################################
         // #                       !!! 用户配置区 !!!                       #
         // ##################################################################
-
-        // 1. 将下面的URL替换为您的Cloudflare Worker地址
-        const WORKER_URL = 'https://nas-hook.111312.xyz';
-
-        // 2. 指定您想监控的网络接口名称 (可以是一个或多个)
-        //    根据您提供的数据，'eth0' 和 'wlan0' 是主要接口
+        const WORKER_URL = 'https://nas-metrics-proxy.youraccount.workers.dev';
         const TARGET_INTERFACES = ['eth0', 'wlan0'];
 
+        // 忽略这些类型的文件系统，避免显示系统临时分区
+        const EXCLUDED_FILESYSTEM_TYPES = new Set([
+            'tmpfs', 'devtmpfs', 'devfs', 'iso9660', 'squashfs', 'udf', 'vfat'
+        ]);
         // ##################################################################
         
-        // 用于存储上一次获取的数据，以便计算速率
-        let previousCpuData = null;
-        let previousNetData = null;
-        let lastFetchTime = null;
+        let previousCpuData = null, previousNetData = null, lastFetchTime = null, bootTimestamp = 0;
 
-        // --- 辅助函数 ---
         function formatBytes(bytes, decimals = 2) {
-            if (bytes === 0) return '0 Bytes';
+            if (bytes <= 0) return '0 Bytes';
             const k = 1024;
-            const dm = decimals < 0 ? 0 : decimals;
             const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
         }
 
         function formatSpeed(bytesPerSecond, decimals = 2) {
              if (bytesPerSecond < 1) return '0 B/s';
             const k = 1024;
-            const dm = decimals < 0 ? 0 : decimals;
             const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
             const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
-            return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+            return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
+        }
+        
+        function formatUptime(totalSeconds) {
+            if (totalSeconds <= 0) return '计算中...';
+            totalSeconds = Math.floor(totalSeconds);
+            const days = Math.floor(totalSeconds / 86400);
+            totalSeconds %= 86400;
+            const hours = Math.floor(totalSeconds / 3600);
+            totalSeconds %= 3600;
+            const minutes = Math.floor(totalSeconds / 60);
+            let parts = [];
+            if (days > 0) parts.push(`${days} 天`);
+            if (hours > 0) parts.push(`${hours} 小时`);
+            if (minutes > 0) parts.push(`${minutes} 分钟`);
+            if (parts.length === 0 && totalSeconds > 0) return `${totalSeconds} 秒`;
+            return parts.join(' ');
         }
 
-        // --- 数据解析与计算 ---
         function parseMetrics(text) {
             const metrics = {
                 cpu: { total: 0, idle: 0 },
                 memory: { total: 0, available: 0 },
-                network: { received: 0, transmitted: 0 }
+                network: { received: 0, transmitted: 0 },
+                bootTime: 0,
+                filesystems: {}
             };
 
             const lines = text.split('\n');
             for (const line of lines) {
                 if (line.startsWith('#')) continue;
+                
+                const parts = line.split(' ');
+                const value = parseFloat(parts[1]);
 
-                // CPU
                 if (line.startsWith('node_cpu_seconds_total')) {
-                    const value = parseFloat(line.split(' ')[1]);
                     metrics.cpu.total += value;
-                    if (line.includes('mode="idle"')) {
-                        metrics.cpu.idle += value;
-                    }
+                    if (line.includes('mode="idle"')) metrics.cpu.idle += value;
                 }
-                // Memory
-                else if (line.startsWith('node_memory_MemTotal_bytes')) {
-                    metrics.memory.total = parseFloat(line.split(' ')[1]);
-                }
-                else if (line.startsWith('node_memory_MemAvailable_bytes')) {
-                    metrics.memory.available = parseFloat(line.split(' ')[1]);
-                }
-                // Network
+                else if (line.startsWith('node_memory_MemTotal_bytes')) metrics.memory.total = value;
+                else if (line.startsWith('node_memory_MemAvailable_bytes')) metrics.memory.available = value;
                 else if (line.startsWith('node_network_receive_bytes_total') || line.startsWith('node_network_transmit_bytes_total')) {
                     const isReceive = line.startsWith('node_network_receive_bytes_total');
                     const interfaceMatch = line.match(/device="([^"]+)"/);
                     if (interfaceMatch && TARGET_INTERFACES.includes(interfaceMatch[1])) {
-                        const value = parseFloat(line.split(' ')[1]);
-                        if (isReceive) {
-                            metrics.network.received += value;
-                        } else {
-                            metrics.network.transmitted += value;
-                        }
+                        if (isReceive) metrics.network.received += value;
+                        else metrics.network.transmitted += value;
+                    }
+                }
+                else if (line.startsWith('node_boot_time_seconds')) metrics.bootTime = value;
+                else if (line.startsWith('node_filesystem_')) {
+                    const fstypeMatch = line.match(/fstype="([^"]+)"/);
+                    const mountpointMatch = line.match(/mountpoint="([^"]+)"/);
+                    if (fstypeMatch && mountpointMatch && !EXCLUDED_FILESYSTEM_TYPES.has(fstypeMatch[1])) {
+                        const mountpoint = mountpointMatch[1];
+                        if (!metrics.filesystems[mountpoint]) metrics.filesystems[mountpoint] = {};
+                        if (line.startsWith('node_filesystem_size_bytes')) metrics.filesystems[mountpoint].size = value;
+                        if (line.startsWith('node_filesystem_avail_bytes')) metrics.filesystems[mountpoint].avail = value;
                     }
                 }
             }
             return metrics;
         }
+        
+        // 新增：更新硬盘信息的函数
+        function updateDiskDisplay(filesystems) {
+            const container = document.getElementById('disk-info-container');
+            const title = document.getElementById('disk-title');
+            container.innerHTML = ''; // 清空旧数据
+            
+            const fsEntries = Object.entries(filesystems);
 
-        // --- 主函数 ---
+            if (fsEntries.length > 0) {
+                 title.style.display = 'block';
+            } else {
+                 title.style.display = 'none';
+                 return;
+            }
+
+            for (const [mountpoint, data] of fsEntries) {
+                if (data.size > 0 && data.avail !== undefined) {
+                    const total = data.size;
+                    const available = data.avail;
+                    const used = total - available;
+                    const usagePercent = (used / total) * 100;
+                    
+                    const cardHTML = `
+                        <div class="metric-card">
+                            <span class="metric-label">硬盘 (${mountpoint})</span>
+                            <div class="metric-value">${usagePercent.toFixed(1)} %</div>
+                            <div class="metric-subvalue">${formatBytes(used, 1)} / ${formatBytes(total, 1)}</div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" style="width: ${usagePercent.toFixed(1)}%;"></div>
+                            </div>
+                        </div>
+                    `;
+                    container.innerHTML += cardHTML;
+                }
+            }
+        }
+
         async function fetchData() {
             const statusText = document.getElementById('status-text');
             const errorText = document.getElementById('error-text');
             
             try {
                 const response = await fetch(WORKER_URL);
-                if (!response.ok) {
-                    throw new Error(`请求失败: ${response.status} ${response.statusText}`);
-                }
+                if (!response.ok) throw new Error(`请求失败: ${response.status} ${response.statusText}`);
                 const text = await response.text();
                 const now = Date.now();
-                
                 const currentMetrics = parseMetrics(text);
                 
-                // --- 计算 CPU ---
+                // CPU
                 if (previousCpuData) {
                     const totalDiff = currentMetrics.cpu.total - previousCpuData.total;
                     const idleDiff = currentMetrics.cpu.idle - previousCpuData.idle;
-                    const usage = 100 * (1 - (idleDiff / totalDiff));
+                    const usage = totalDiff > 0 ? 100 * (1 - (idleDiff / totalDiff)) : 0;
                     document.getElementById('cpu-usage').textContent = `${usage.toFixed(1)} %`;
                 }
                 
-                // --- 计算内存 ---
+                // 内存
                 const memTotalMB = (currentMetrics.memory.total / 1024 / 1024);
                 const memAvailableMB = (currentMetrics.memory.available / 1024 / 1024);
                 const memUsedMB = memTotalMB - memAvailableMB;
-                const memUsagePercent = (memUsedMB / memTotalMB) * 100;
+                const memUsagePercent = memTotalMB > 0 ? (memUsedMB / memTotalMB) * 100 : 0;
                 document.getElementById('mem-usage').textContent = `${memUsagePercent.toFixed(1)} %`;
                 document.getElementById('mem-details').textContent = `${memUsedMB.toFixed(0)} / ${memTotalMB.toFixed(0)} MB`;
                 
-                // --- 计算网络 ---
+                // 网络
                 if (previousNetData && lastFetchTime) {
-                    const timeDelta = (now - lastFetchTime) / 1000; // in seconds
-                    
+                    const timeDelta = (now - lastFetchTime) / 1000;
                     const downBytesDiff = currentMetrics.network.received - previousNetData.received;
                     const upBytesDiff = currentMetrics.network.transmitted - previousNetData.transmitted;
-
-                    const downSpeed = downBytesDiff / timeDelta;
-                    const upSpeed = upBytesDiff / timeDelta;
-
-                    document.getElementById('net-down').textContent = formatSpeed(downSpeed);
-                    document.getElementById('net-up').textContent = formatSpeed(upSpeed);
+                    document.getElementById('net-down').textContent = formatSpeed(downBytesDiff / timeDelta);
+                    document.getElementById('net-up').textContent = formatSpeed(upBytesDiff / timeDelta);
                 }
+                
+                // 开机和运行时间
+                if (currentMetrics.bootTime > 0) {
+                    bootTimestamp = currentMetrics.bootTime;
+                    const bootDate = new Date(bootTimestamp * 1000);
+                    document.getElementById('boot-time').textContent = bootDate.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+                }
+                
+                // 调用硬盘更新函数
+                updateDiskDisplay(currentMetrics.filesystems);
 
-                document.getElementById('net-total-down').textContent = formatBytes(currentMetrics.network.received, 1);
-                document.getElementById('net-total-up').textContent = formatBytes(currentMetrics.network.transmitted, 1);
-
-                // 更新状态以备下次计算
                 previousCpuData = currentMetrics.cpu;
                 previousNetData = currentMetrics.network;
                 lastFetchTime = now;
@@ -244,10 +321,17 @@
                 errorText.textContent = `错误: ${error.message}`;
             }
         }
+        
+        function updateUptimeDisplay() {
+            if (bootTimestamp > 0) {
+                const uptimeSeconds = (Date.now() / 1000) - bootTimestamp;
+                document.getElementById('system-uptime').textContent = formatUptime(uptimeSeconds);
+            }
+        }
 
-        // 首次加载，并设置每5秒刷新一次
         fetchData();
         setInterval(fetchData, 5000);
+        setInterval(updateUptimeDisplay, 1000);
     </script>
 </body>
 </html>
